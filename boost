@@ -4,12 +4,15 @@ import tkinter as tk
 import subprocess
 import re
 import time
+import signal
+import os
 
 MAX_VOL = 300
 AUTO_REFRESH_MS = 2500
 USER_LOCK_SECS  = 2.5
 
-CLARITY_SINK = "boost_clarity"
+CLARITY_SINK      = "boost_clarity"
+CLARITY_STATE_FILE = os.path.expanduser("~/.cache/boost_pre_clarity_sink")
 # mbeq 15 bands: ~50/100/156/220/311/440/622/880/1250/1750/2500/3500/5000/10k/20k Hz
 # Strategy: cut mud in low-mids, gentle lift in presence/air — no aggressive boost to avoid clip
 CLARITY_CTRL = "0,0,0,-3,-4,-1,0,0,0,0,1,2,1,1,0"
@@ -103,12 +106,27 @@ def cleanup_stale_clarity():
     """Unload any leftover clarity LADSPA modules from previous sessions."""
     out = subprocess.run(["pactl", "list", "modules", "short"],
                          capture_output=True, text=True).stdout
+    found = False
     for line in out.splitlines():
         parts = line.split(None, 2)
         if len(parts) >= 2 and parts[1] == "module-ladspa-sink":
             args = parts[2] if len(parts) > 2 else ""
             if f"sink_name={CLARITY_SINK}" in args:
                 subprocess.run(["pactl", "unload-module", parts[0]], capture_output=True)
+                found = True
+    if found:
+        time.sleep(0.3)  # let PipeWire remove the sink before querying
+        # Try to restore the exact sink that was active before Clarity was enabled
+        saved = None
+        if os.path.exists(CLARITY_STATE_FILE):
+            saved = open(CLARITY_STATE_FILE).read().strip()
+            os.remove(CLARITY_STATE_FILE)
+        real_sinks = [s for s in parse_sinks() if s["name"] != CLARITY_SINK]
+        sink_names = [s["name"] for s in real_sinks]
+        target = saved if saved in sink_names else (real_sinks[0]["name"] if real_sinks else None)
+        if target:
+            subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
+            move_inputs_to_sink(target)
 
 # ── UI components ─────────────────────────────────────────────────────────────
 
@@ -210,6 +228,8 @@ class BoostApp(tk.Tk):
         self._pre_clarity_sink:  str | None = None
 
         cleanup_stale_clarity()  # remove leftovers from any previous session
+        signal.signal(signal.SIGTERM, lambda *_: self._on_close())
+        signal.signal(signal.SIGHUP,  lambda *_: self._on_close())
         self._build_ui()
         self._full_refresh()
 
@@ -280,7 +300,11 @@ class BoostApp(tk.Tk):
             return
 
         self._pre_clarity_sink = get_default_sink()
-        master = sinks[0]["name"]
+        sink_names = [s["name"] for s in sinks]
+        master = (self._pre_clarity_sink if self._pre_clarity_sink in sink_names
+                  else sinks[0]["name"])
+        # persist so we can restore if the app is killed (SIGKILL)
+        open(CLARITY_STATE_FILE, "w").write(self._pre_clarity_sink)
 
         result = subprocess.run(
             ["pactl", "load-module", "module-ladspa-sink",
@@ -323,6 +347,8 @@ class BoostApp(tk.Tk):
             self._clarity_module = None
 
         self._pre_clarity_sink = None
+        if os.path.exists(CLARITY_STATE_FILE):
+            os.remove(CLARITY_STATE_FILE)
         self._clarity_bar.pack_forget()
         self._clarity_btn.configure(bg=SURFACE, fg=SUBTEXT, text="✦ Clarity: OFF")
         self._full_refresh()

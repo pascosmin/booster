@@ -106,27 +106,14 @@ def cleanup_stale_clarity():
     """Unload any leftover clarity LADSPA modules from previous sessions."""
     out = subprocess.run(["pactl", "list", "modules", "short"],
                          capture_output=True, text=True).stdout
-    found = False
     for line in out.splitlines():
         parts = line.split(None, 2)
         if len(parts) >= 2 and parts[1] == "module-ladspa-sink":
             args = parts[2] if len(parts) > 2 else ""
             if f"sink_name={CLARITY_SINK}" in args:
                 subprocess.run(["pactl", "unload-module", parts[0]], capture_output=True)
-                found = True
-    if found:
-        time.sleep(0.3)  # let PipeWire remove the sink before querying
-        # Try to restore the exact sink that was active before Clarity was enabled
-        saved = None
-        if os.path.exists(CLARITY_STATE_FILE):
-            saved = open(CLARITY_STATE_FILE).read().strip()
-            os.remove(CLARITY_STATE_FILE)
-        real_sinks = [s for s in parse_sinks() if s["name"] != CLARITY_SINK]
-        sink_names = [s["name"] for s in real_sinks]
-        target = saved if saved in sink_names else (real_sinks[0]["name"] if real_sinks else None)
-        if target:
-            subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
-            move_inputs_to_sink(target)
+    if os.path.exists(CLARITY_STATE_FILE):
+        os.remove(CLARITY_STATE_FILE)
 
 # ── UI components ─────────────────────────────────────────────────────────────
 
